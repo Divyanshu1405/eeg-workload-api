@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+
+# Datasets
+data/raw/*
+data/processed/*
+
+# Allow folder structure to exist in Git
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Experiment outputs
+experiments/*
+!experiments/.gitkeep
+
+# Trained models - normally ignored
+models/production/*
+!models/production/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
