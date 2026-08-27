@@ -10,6 +10,12 @@ This module:
 
 from fastapi import APIRouter
 
+from app.schemas.prediction import (
+    PredictionRequest,
+    PredictionResponse,
+    WorkloadPrediction,
+)
+
 
 router = APIRouter()
 
@@ -17,3 +23,17 @@ router = APIRouter()
 @router.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@router.post("/predict", response_model=PredictionResponse)
+def predict_workload(request: PredictionRequest):
+    return PredictionResponse(
+        session_id=request.session_id,
+        status="success",
+        predictions=[
+            WorkloadPrediction(
+                window=1,
+                workload="medium",
+            )
+        ],
+    )
