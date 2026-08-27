@@ -2,7 +2,7 @@
 
 Backend service for the EEG Mental Workload project.
 
-This repository contains the complete EEG/ML pipeline, from data processing and model training to production inference through a FastAPI service.
+This repository is intended to contain the EEG/ML pipeline, from data processing and model training to production inference through a FastAPI service.
 
 ## Project Scope
 
@@ -21,14 +21,17 @@ The project uses publicly available EEG datasets. Dataset files, experiment outp
 
 ## Current Status
 
-The API skeleton is currently implemented.
+The repository currently contains the initial backend/API skeleton.
 
-Available endpoints:
+Implemented:
 
-- `GET /health` — checks whether the API is running.
-- `POST /predict` — currently returns a placeholder workload prediction.
+- FastAPI application
+- `GET /health` endpoint
+- `POST /predict` endpoint with placeholder inference
+- Pydantic request/response schemas
+- Initial project structure and documentation
 
-Real EEG preprocessing and model inference will be added as the ML pipeline is developed.
+The `/predict` endpoint currently returns a placeholder prediction. Real EEG preprocessing, signal-quality assessment, feature extraction, model training, and model inference have not yet been implemented.
 
 ## Repository Structure
 
@@ -52,22 +55,16 @@ eeg-workload-api/
 ├── models/
 │   └── production/              # Approved production model
 │
-├── notebooks/                   # Research and exploratory analysis
-│
-├── tests/                       # Automated tests
+├── notebooks/                   # Exploratory and research notebooks
 │
 ├── scripts/                     # Utility scripts
 │
-├── .github/
-│   └── workflows/               # GitHub Actions
-│
-├── Dockerfile                   # Container configuration
 ├── requirements.txt             # Python dependencies
 ├── .gitignore                   # Files excluded from Git
 └── README.md                    # Project documentation
 ```
 
-## Technology Stack
+## Current Technology Stack
 
 ### Backend
 
@@ -75,6 +72,10 @@ eeg-workload-api/
 - FastAPI
 - Uvicorn
 - Pydantic
+
+## Planned Technology Stack
+
+The following technologies are candidates for the EEG/ML pipeline and will be added as the corresponding parts of the project are implemented and evaluated.
 
 ### EEG / Scientific Computing
 
@@ -94,12 +95,14 @@ eeg-workload-api/
 - PyTorch
 - EEGNet
 
-### Development
+### Development / Deployment
 
 - Git
 - GitHub
 - Docker
 - GitHub Actions
+
+Specific ML/DL algorithms and deployment infrastructure are not considered finalized until they have been evaluated or implemented.
 
 ## Local Setup
 
@@ -222,9 +225,9 @@ Next.js Application
 
 ## Training Pipeline
 
-The `training/` directory contains code used to train and evaluate workload-estimation models.
+The `training/` directory is intended to contain code used to train and evaluate workload-estimation models.
 
-The general workflow will be:
+The planned workflow is:
 
 ```text
 Public Dataset
@@ -244,7 +247,7 @@ Model Selection
 Production Model
 ```
 
-The project will prioritize subject-independent evaluation to investigate how well models generalize to participants whose EEG was not used during training.
+The project intends to prioritize subject-independent evaluation to investigate how well models generalize to participants whose EEG was not used during training.
 
 ## Dataset Policy
 
@@ -314,15 +317,24 @@ Changes to API request or response schemas must be coordinated with the frontend
 
 The API should remain independent of the Next.js application and should not contain frontend-specific logic.
 
+## Development Principles
+
+1. Build and validate the simplest working pipeline first.
+2. Do not assume a particular ML/DL model will perform best.
+3. Prevent data leakage during model evaluation.
+4. Separate experimental code from production inference code.
+5. Keep datasets and experimental artifacts out of Git.
+6. Keep production preprocessing compatible with the production model.
+7. Prefer reproducible experiments over undocumented manual changes.
+8. Do not claim model performance before it has been experimentally evaluated.
+
 ## Deployment
 
 The application is intended to be containerized using Docker.
 
 The final hosting method will depend on available free infrastructure. Local or self-hosted execution will remain a fallback.
 
-Production deployment automation will be handled through GitHub Actions.
-
-A production deployment is expected to be triggered when an approved production model is pushed to the `main` branch.
+Deployment automation will be implemented after the production inference pipeline is established.
 
 ## Research Context
 
