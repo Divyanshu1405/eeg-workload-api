@@ -17,6 +17,9 @@ from app.schemas.prediction import (
 )
 
 
+from app.services.eeg_service import eeg_service
+
+
 router = APIRouter()
 
 
@@ -27,13 +30,4 @@ def health_check():
 
 @router.post("/predict", response_model=PredictionResponse)
 def predict_workload(request: PredictionRequest):
-    return PredictionResponse(
-        session_id=request.session_id,
-        status="success",
-        predictions=[
-            WorkloadPrediction(
-                window=1,
-                workload="medium",
-            )
-        ],
-    )
+    return eeg_service.process_request(request)
