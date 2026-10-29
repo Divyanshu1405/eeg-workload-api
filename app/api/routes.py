@@ -4,36 +4,35 @@ HTTP API routes for the EEG Workload API.
 This module:
 - Defines the endpoints exposed to clients.
 - Receives and validates API requests.
-- Passes actual processing work to service modules.
-
+- Dispatches inference requests to the InferenceService.
 """
 
 from fastapi import APIRouter
 
-from app.schemas.prediction import (
-    PredictionRequest,
-    PredictionResponse,
-    WorkloadPrediction,
-)
-
+from app.schemas.prediction import PredictionRequest, PredictionResponse
+from app.services.inference import inference_service
 
 router = APIRouter()
 
 
 @router.get("/health")
 def health_check():
-    return {"status": "ok"}
+    """Health check endpoint exposing service health and model status."""
+    model_info = inference_service.get_model_info()
+    return {
+        "status": "ok",
+        "service": "EEG Workload API",
+        "version": "0.1.0",
+        "model_connected": model_info["model_connected"],
+        "model_info": model_info,
+    }
 
 
 @router.post("/predict", response_model=PredictionResponse)
 def predict_workload(request: PredictionRequest):
-    return PredictionResponse(
-        session_id=request.session_id,
-        status="success",
-        predictions=[
-            WorkloadPrediction(
-                window=1,
-                workload="medium",
-            )
-        ],
-    )
+    """
+    Mental workload prediction endpoint.
+    Accepts an EEG feature vector. If an approved trained model is available in
+    models/production/, it runs inference; otherwise returns a clearly labelled placeholder.
+    """
+    return inference_service.predict(request)
