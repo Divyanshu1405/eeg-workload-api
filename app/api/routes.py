@@ -1,3 +1,4 @@
+
 """
 HTTP API routes for the EEG Workload API.
 
@@ -32,7 +33,5 @@ def health_check():
 def predict_workload(request: PredictionRequest):
     """
     Mental workload prediction endpoint.
-    Accepts an EEG feature vector. If an approved trained model is available in
-    models/production/, it runs inference; otherwise returns a clearly labelled placeholder.
     """
     return inference_service.predict(request)
