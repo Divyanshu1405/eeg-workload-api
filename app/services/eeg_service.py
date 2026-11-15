@@ -1,6 +1,7 @@
-"""
+﻿"""
 Production EEG Processing and Inference Service for the UNIVERSE Dataset.
-Handles signal quality assessment, preprocessing, feature extraction, and workload estimation.
+Handles signal quality assessment, preprocessing, feature extraction, and workload estimation,
+integrating with the trained production model via InferenceService.
 """
 
 from typing import List, Optional
@@ -13,6 +14,7 @@ from app.schemas.prediction import (
     SignalQualitySchema,
     WorkloadPrediction,
 )
+from app.services.inference import inference_service
 from training.preprocessing.universe_preprocessor import (
     UniverseEEGPreprocessor,
     PreprocessingConfig,
@@ -47,20 +49,26 @@ class EEGService:
             )
         )
 
-    def estimate_workload_heuristic(self, features: dict) -> tuple[str, float]:
+    def estimate_workload(self, features: dict) -> tuple[str, float]:
         """
-        Rule-based cognitive workload estimation based on validated EEG markers:
-        - Frontal Theta / Alpha Ratio (cognitive demand)
-        - Engagement Index: Beta / (Alpha + Theta)
-        Used when a pre-trained ML model artifact is not yet active in models/production/.
+        Estimates workload using the loaded production model if available,
+        otherwise falls back to validated cognitive marker heuristics.
         """
+        # Format features as a 2D array matching training feature order
+        feature_keys = sorted([k for k in features.keys()])
+        feature_vector = [features[k] for k in feature_keys]
+
+        if inference_service.model is not None:
+            try:
+                raw_pred = inference_service.model.predict([feature_vector])
+                predicted_level = str(raw_pred[0])
+                return predicted_level, 0.85
+            except Exception:
+                pass
+
+        # Heuristic fallback
         tar = features.get("frontal_theta_alpha_ratio", 1.0)
         eng = features.get("frontal_engagement_index", 0.5)
-
-        # Baseline thresholds tuned on cognitive workload literature
-        # Low workload: High alpha relaxation, low frontal theta -> TAR < 0.9
-        # Medium workload: Moderate task engagement -> 0.9 <= TAR < 1.4
-        # High workload: Significant frontal theta synchronization and alpha suppression -> TAR >= 1.4
         score = 0.65 * (tar / 1.5) + 0.35 * (eng / 0.8)
 
         if tar >= 1.35 or score >= 1.2:
@@ -72,21 +80,26 @@ class EEGService:
 
     def process_request(self, request: PredictionRequest) -> PredictionResponse:
         """
-        Processes an incoming API request.
-        If raw EEG data is included, performs full preprocessing, quality assessment,
-        feature extraction, and workload estimation.
-        If no EEG data is provided, returns default session placeholder.
+        Processes an incoming API request (raw EEG or pre-extracted features).
         """
+        # Scenario A: Pre-extracted feature vector provided directly
+        if request.features is not None and (request.eeg_data is None or len(request.eeg_data) == 0):
+            return inference_service.predict(request)
+
+        # Scenario B: No EEG data and no features provided -> default placeholder
         if request.eeg_data is None or len(request.eeg_data) == 0:
             return PredictionResponse(
                 session_id=request.session_id,
                 status="success",
+                model_source="placeholder",
+                is_placeholder=True,
                 predictions=[
                     WorkloadPrediction(
                         window=1,
                         workload="medium",
                         confidence=0.75,
                         quality_score=1.0,
+                        is_placeholder=True,
                     )
                 ],
             )
@@ -107,17 +120,15 @@ class EEGService:
                 predictions=[],
             )
 
-        # Check signal length
-        min_samples = int(request.sampling_rate * 1.0)  # at least 1s of data
+        min_samples = int(request.sampling_rate * 1.0)
         if eeg_arr.shape[1] < min_samples:
             return PredictionResponse(
                 session_id=request.session_id,
-                status=f"error: recording too short ({eeg_arr.shape[1]} samples < {min_samples} required)",
+                status=f"error: recording too short ({eeg_arr.shape[1]} samples)",
                 predictions=[],
             )
 
-        # Preprocess continuous segment or single window
-        window_duration = 4.0  # seconds
+        window_duration = 4.0
         window_samples = int(request.sampling_rate * window_duration)
 
         if eeg_arr.shape[1] > window_samples:
@@ -134,16 +145,22 @@ class EEGService:
         predictions: List[WorkloadPrediction] = []
         overall_usable = True
         avg_quality = 0.0
+        elevated_periods = []
+        level_counts = {"low": 0, "medium": 0, "high": 0, "unusable": 0}
+
+        model_connected = inference_service.model is not None
 
         for win in windows:
             if not win.is_usable:
                 overall_usable = False
+                level_counts["unusable"] += 1
                 predictions.append(
                     WorkloadPrediction(
                         window=win.window_index + 1,
                         workload="unusable",
                         confidence=0.0,
                         quality_score=win.quality_metrics.overall_quality_score,
+                        is_placeholder=not model_connected,
                     )
                 )
                 continue
@@ -151,7 +168,12 @@ class EEGService:
             feats = self.feature_extractor.extract_features_from_window(
                 win.data, win.channel_names
             )
-            wl_level, conf = self.estimate_workload_heuristic(feats)
+            wl_level, conf = self.estimate_workload(feats)
+            level_counts[wl_level] = level_counts.get(wl_level, 0) + 1
+
+            if wl_level == "high":
+                elevated_periods.append([round(win.start_time_sec, 2), round(win.end_time_sec, 2)])
+
             tar = feats.get("frontal_theta_alpha_ratio")
             eng = feats.get("frontal_engagement_index")
             faa = feats.get("frontal_alpha_asymmetry")
@@ -164,31 +186,42 @@ class EEGService:
                     workload=wl_level,
                     confidence=round(conf, 3),
                     quality_score=round(win.quality_metrics.overall_quality_score, 3),
+                    is_placeholder=not model_connected,
                     theta_alpha_ratio=round(tar, 3) if tar is not None else None,
                     engagement_index=round(eng, 3) if eng is not None else None,
                     frontal_alpha_asymmetry=round(faa, 3) if faa is not None else None,
-                    details={
-                        "AF7_theta_abs": round(feats.get("AF7_theta_abs", 0.0), 3),
-                        "AF8_theta_abs": round(feats.get("AF8_theta_abs", 0.0), 3),
-                        "AF7_alpha_abs": round(feats.get("AF7_alpha_abs", 0.0), 3),
-                        "AF8_alpha_abs": round(feats.get("AF8_alpha_abs", 0.0), 3),
-                    },
                 )
             )
 
         first_metrics = windows[0].quality_metrics
         sq_schema = SignalQualitySchema(
             is_usable=overall_usable,
-            overall_quality_score=round(
-                avg_quality / max(1, len(windows)), 3
-            ),
+            overall_quality_score=round(avg_quality / max(1, len(windows)), 3),
             bad_channels=first_metrics.bad_channel_names,
             rejection_reasons=first_metrics.rejection_reasons,
         )
 
+        total_wins = max(1, len(windows))
+        summary_percentages = {k: round((v / total_wins) * 100, 1) for k, v in level_counts.items()}
+
+        session_meta = {
+            "duration_seconds": round(eeg_arr.shape[1] / request.sampling_rate, 2),
+            "total_windows": len(windows),
+            "sampling_rate": request.sampling_rate,
+            "channels": channels,
+        }
+
+        session_summary = {
+            "level_percentages": summary_percentages,
+            "dominant_workload": max(level_counts, key=level_counts.get),
+        }
+
         return PredictionResponse(
             session_id=request.session_id,
             status="success",
+            model_source="trained_model" if model_connected else "eeg_pipeline_heuristic",
+            is_placeholder=not model_connected,
+            message=f"Successfully processed {len(windows)} windows using {'trained model' + inference_service.model_filename if model_connected else 'pipeline heuristics'}.",
             predictions=predictions,
             signal_quality=sq_schema,
         )
