@@ -1,21 +1,9 @@
-"""
+﻿"""
 Signal Quality Assessment (SQA / SQI) for wearable Muse S EEG in the UNIVERSE dataset.
-
-UNIVERSE captures EEG via a 4-channel Muse S headband (TP9, AF7, AF8, TP10) at 256 Hz
-in both controlled laboratory and uncontrolled ("in-the-wild") office environments.
-Wearable EEG signals in the wild suffer from movement artifacts, electrode contact degradation,
-and facial/jaw muscle activation (EMG).
-
-This module implements automated signal quality checks:
-1. Flatline detection (electrode disconnect / dropped connection)
-2. Clipping and extreme amplitude saturation (ADC boundary or high-voltage spikes)
-3. Excessive amplitude artifact ratio (samples outside biological EEG range, e.g. > 150 uV)
-4. Signal-to-Noise Ratio (SNR) in dB using Welch periodogram power comparison
-5. Channel-level and window-level acceptance decisions
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional
 import numpy as np
 
 
@@ -44,16 +32,17 @@ class SignalQualityMetrics:
 class SignalQualityAssessor:
     """
     Evaluates signal quality indices (SQI) for Muse S EEG recordings.
+    Handles both zero-centered microvolt signals and Muse S DC-offset (~820 uV) raw ADC signals.
     """
 
     def __init__(
         self,
         sampling_rate: float = 256.0,
-        flatline_std_threshold: float = 0.5,  # std below 0.5 uV is considered flatline
-        max_amplitude_uv: float = 150.0,      # realistic physiological scalp EEG is typically < 100-150 uV
-        clipping_threshold_uv: float = 400.0,  # Muse saturation limit or extreme contact artifact
-        max_bad_sample_ratio: float = 0.20,   # reject channel if > 20% bad samples
-        min_snr_db: float = 2.0,              # minimum acceptable SNR in dB (in-band 1-40Hz vs out-of-band)
+        flatline_std_threshold: float = 0.5,
+        max_amplitude_uv: float = 150.0,
+        clipping_threshold_uv: float = 400.0,
+        max_bad_sample_ratio: float = 0.20,
+        min_snr_db: float = 1.0,
         critical_channels: Optional[List[str]] = None,
     ):
         self.sampling_rate = sampling_rate
@@ -62,44 +51,35 @@ class SignalQualityAssessor:
         self.clipping_threshold_uv = clipping_threshold_uv
         self.max_bad_sample_ratio = max_bad_sample_ratio
         self.min_snr_db = min_snr_db
-        # AF7 and AF8 are critical for frontal mental workload/stress detection in UNIVERSE
         self.critical_channels = critical_channels or ["AF7", "AF8"]
 
     def compute_snr_db(self, signal: np.ndarray) -> float:
-        """
-        Calculates Signal-to-Noise Ratio (SNR) in dB using spectral power ratio.
-        Signal band: 1.0 Hz - 40.0 Hz (physiological brain rhythm).
-        Noise band: 0.1 - 0.9 Hz (slow baseline drift) + 45.0 - 100.0 Hz (muscle/powerline noise).
-        """
         n = len(signal)
         if n < 32:
             return 0.0
 
-        # Mean-center the signal
         centered = signal - np.mean(signal)
-        # Compute FFT power spectrum
         fft_vals = np.fft.rfft(centered)
         psd = (np.abs(fft_vals) ** 2) / (n * self.sampling_rate)
         freqs = np.fft.rfftfreq(n, 1.0 / self.sampling_rate)
 
         signal_mask = (freqs >= 1.0) & (freqs <= 40.0)
-        noise_mask = ((freqs >= 0.1) & (freqs < 1.0)) | ((freqs >= 45.0) & (freqs <= min(100.0, self.sampling_rate / 2)))
+        noise_mask = ((freqs >= 0.1) & (freqs < 1.0)) | (
+            (freqs >= 45.0) & (freqs <= min(100.0, self.sampling_rate / 2))
+        )
 
         p_signal = np.sum(psd[signal_mask])
         p_noise = np.sum(psd[noise_mask])
 
         if p_noise <= 1e-12:
-            return 30.0  # clean upper bound
+            return 30.0
         if p_signal <= 1e-12:
-            return -20.0  # completely noise/zero
+            return -20.0
 
         snr = 10.0 * np.log10(p_signal / p_noise)
         return float(np.clip(snr, -30.0, 40.0))
 
     def evaluate_channel(self, channel_data: np.ndarray, channel_name: str) -> ChannelQuality:
-        """
-        Assesses a single channel's quality over an epoch/window.
-        """
         data = np.asarray(channel_data, dtype=np.float64)
         n = len(data)
 
@@ -116,13 +96,14 @@ class SignalQualityAssessor:
                 reason="Channel data is empty or entirely NaN",
             )
 
-        # Replace isolated NaNs if any
         if np.any(np.isnan(data)):
             mask = np.isnan(data)
             data = np.interp(np.arange(n), np.where(~mask)[0], data[~mask])
 
-        std_uv = float(np.std(data))
-        abs_data = np.abs(data)
+        # Remove DC offset (e.g., Muse S ~820 uV ADC baseline) for AC artifact evaluation
+        centered = data - np.mean(data)
+        std_uv = float(np.std(centered))
+        abs_centered = np.abs(centered)
 
         # 1. Flatline check
         flatline_samples = np.abs(np.diff(data)) < 1e-4
@@ -140,8 +121,13 @@ class SignalQualityAssessor:
                 reason=f"Channel flatlined (std={std_uv:.2f} uV, flat_ratio={flatline_ratio:.2f})",
             )
 
-        # 2. Clipping / saturation check
-        clipping_samples = abs_data >= self.clipping_threshold_uv
+        # 2. Clipping / ADC rail saturation check (AC excursion >= 400 uV or Muse ADC rails <=1 / >=1645 uV)
+        is_muse_dc = 650.0 <= np.mean(data) <= 1050.0
+        if is_muse_dc:
+            clipping_samples = (abs_centered >= self.clipping_threshold_uv) | (data <= 1.0) | (data >= 1645.0)
+        else:
+            clipping_samples = np.abs(data) >= self.clipping_threshold_uv
+
         clipping_ratio = float(np.sum(clipping_samples) / n)
         if clipping_ratio > 0.05:
             return ChannelQuality(
@@ -150,20 +136,19 @@ class SignalQualityAssessor:
                 snr_db=-10.0,
                 flatline_ratio=flatline_ratio,
                 clipping_ratio=clipping_ratio,
-                outlier_ratio=float(np.sum(abs_data > self.max_amplitude_uv) / n),
+                outlier_ratio=float(np.sum(abs_centered > self.max_amplitude_uv) / n),
                 std_uv=std_uv,
                 status="clipped",
-                reason=f"Channel clipped/saturated ({clipping_ratio * 100:.1f}% samples >= {self.clipping_threshold_uv} uV)",
+                reason=f"Channel clipped/saturated ({clipping_ratio * 100:.1f}% samples)",
             )
 
-        # 3. Outlier check (movement / muscle burst)
-        outlier_samples = abs_data > self.max_amplitude_uv
+        # 3. Outlier check (AC movement / muscle burst > 150 uV from baseline)
+        outlier_samples = abs_centered > self.max_amplitude_uv
         outlier_ratio = float(np.sum(outlier_samples) / n)
 
         # 4. SNR estimation
-        snr_db = self.compute_snr_db(data)
+        snr_db = self.compute_snr_db(centered)
 
-        # Determine status
         if outlier_ratio > self.max_bad_sample_ratio:
             return ChannelQuality(
                 channel_name=channel_name,
@@ -207,10 +192,6 @@ class SignalQualityAssessor:
         eeg_data: np.ndarray,
         channel_names: List[str],
     ) -> SignalQualityMetrics:
-        """
-        Assesses all channels in a multi-channel window (shape: [num_channels, num_samples]).
-        Returns overall window usability and per-channel diagnostic metrics.
-        """
         if eeg_data.ndim != 2:
             raise ValueError(f"Expected 2D array [num_channels, num_samples], got shape {eeg_data.shape}")
 
@@ -239,19 +220,15 @@ class SignalQualityAssessor:
                 if quality.reason:
                     rejection_reasons.append(f"[{ch_name}] {quality.reason}")
 
-        # Quality score based on proportion of valid channels & normalized SNR
         ch_ratio = valid_channel_count / max(1, len(channel_names))
         avg_snr = (total_snr / max(1, valid_channel_count)) if valid_channel_count > 0 else 0.0
         snr_factor = np.clip(avg_snr / 20.0, 0.0, 1.0)
         overall_score = float(np.clip(0.6 * ch_ratio + 0.4 * snr_factor, 0.0, 1.0))
 
-        # Critical channel policy:
-        # Frontal channels (AF7, AF8) are vital for cognitive workload detection
         critical_missing = [ch for ch in self.critical_channels if ch in bad_channels]
         if critical_missing:
             rejection_reasons.append(f"Critical channels compromised: {', '.join(critical_missing)}")
 
-        # Decision: usable if at least 2 valid channels AND at least one frontal channel is good
         frontal_good = any(ch in channel_metrics and channel_metrics[ch].is_valid for ch in self.critical_channels)
         is_usable = (valid_channel_count >= 2) and frontal_good and (overall_score >= 0.4)
 

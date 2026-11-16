@@ -1,22 +1,23 @@
-"""
+﻿"""
 Dataset Loader and Ground Truth Synchronizer for the UNIVERSE Dataset.
 UNIVERSE: UNobtrusIVE measuRement of mental workload and stress in uncontrolled environments.
 
 This module handles:
 1. Scanning participant folders (UN_101 to UN_124) across Lab1, Lab2, and Wild conditions
-2. Reading Muse S EEG CSV records with flexible column name resolution
-3. Reading and aligning task labels (N-Back, Stroop, Arithmetic, Sudoku, Office tasks)
-4. Synchronizing sliding EEG epochs with task timestamps and mental workload ratings (Likert 1-5)
+2. Reading Muse S EEG records from either pre-segmented Labeled/<task>/muse_*_RAW.pickle files
+   or continuous Raw/Muse/*.csv files
+3. Reading and aligning task labels (N-Back, Stroop, Arithmetic, Sudoku, Baseline, Wild tasks)
+4. Synchronizing sliding EEG epochs with task ground truth and NASA-TLX workload ratings
 5. Generating subject-independent train / val / test partitions (strictly preventing data leakage)
 6. Synthetic mock dataset generation for reproducible unit and integration testing
 """
 
-from dataclasses import dataclass, field
-import json
-import os
+import csv
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
+import pandas as pd
 
 
 @dataclass
@@ -24,9 +25,19 @@ class TaskInterval:
     task_name: str
     condition: str  # 'easy', 'medium', 'hard', 'baseline', 'wild'
     workload_level: str  # 'low', 'medium', 'high'
-    workload_score: float  # e.g. 1.0 - 5.0
+    workload_score: float  # e.g. 1.0 - 5.0 (or normalized NASA-TLX)
     start_time: float
     end_time: float
+
+
+@dataclass
+class LabeledTaskSegment:
+    task_name: str
+    condition: str
+    workload_level: str
+    workload_score: float
+    eeg_data: np.ndarray  # [4, num_samples]
+    channels: List[str]
 
 
 @dataclass
@@ -84,6 +95,176 @@ class UniverseDatasetLoader:
                 sessions.append(s)
         return sessions
 
+    def _infer_label_from_task_and_nasa(
+        self,
+        task_name: str,
+        nasa_score: Optional[float] = None,
+        explicit_effort: Optional[str] = None,
+    ) -> Tuple[str, str, float]:
+        """
+        Maps UNIVERSE task name + NASA-TLX score (0-100) / mental effort level
+        to canonical ('low', 'medium', 'high') workload class and 1-5 scale score.
+        """
+        t_low = task_name.lower().strip()
+
+        # Normalize NASA-TLX (0-100) to 1.0-5.0 scale if available
+        if nasa_score is not None and not np.isnan(nasa_score):
+            norm_score = round(1.0 + (np.clip(nasa_score, 0.0, 100.0) / 100.0) * 4.0, 2)
+        else:
+            norm_score = 3.0
+
+        # 1. Explicit mental effort label (present in Wild Task_Labels.csv)
+        if explicit_effort:
+            eff = explicit_effort.strip().lower()
+            if eff in ("low", "very low"):
+                return "wild", "low", norm_score if nasa_score is not None else 1.5
+            elif eff in ("high", "very high"):
+                return "wild", "high", norm_score if nasa_score is not None else 4.5
+            elif eff in ("medium", "moderate"):
+                return "wild", "medium", norm_score if nasa_score is not None else 3.0
+
+        # 2. Task-name conventions in UNIVERSE Lab1 / Lab2 / Wild
+        if any(k in t_low for k in ["baseline", "relaxation", "eye_closing", "rest", "low_mw"]):
+            return "baseline", "low", norm_score if nasa_score is not None else 1.5
+        if any(k in t_low for k in ["_hard", "high_mw"]):
+            return "hard", "high", norm_score if nasa_score is not None else 4.5
+        if any(k in t_low for k in ["_easy", "medium_mw"]):
+            # In UNIVERSE cognitive battery, easy tasks (Stroop easy, N-back easy, Sudoku easy, Arithmetix easy)
+            # represent moderate/medium cognitive engagement compared to resting/relaxation baseline
+            if nasa_score is not None:
+                if nasa_score < 35.0:
+                    return "easy", "low", norm_score
+                elif nasa_score > 68.0:
+                    return "easy", "high", norm_score
+            return "easy", "medium", norm_score if nasa_score is not None else 3.0
+
+        # 3. Fallback to NASA-TLX thresholds
+        if nasa_score is not None:
+            if nasa_score < 35.0:
+                return "nasa_low", "low", norm_score
+            elif nasa_score > 65.0:
+                return "nasa_high", "high", norm_score
+            return "nasa_med", "medium", norm_score
+
+        return "unknown", "medium", 3.0
+
+    def _parse_universe_task_metadata(self, label_path: Optional[Path]) -> Dict[str, Dict]:
+        """
+        Reads UNIVERSE Task_Labels.csv (both Lab1/Lab2 format and Wild format)
+        and returns a lookup dictionary keyed by lowercase task/folder name.
+        """
+        meta_map: Dict[str, Dict] = {}
+        if label_path is None or not label_path.exists():
+            return meta_map
+
+        with open(label_path, "r", encoding="utf-8", errors="ignore") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                return meta_map
+
+            for row in reader:
+                # Lab format uses 'Task'; Wild format uses 'Labeled folder names'
+                raw_name = (
+                    row.get("Labeled folder names")
+                    or row.get("Task")
+                    or row.get("task_name")
+                    or ""
+                ).strip()
+                if not raw_name:
+                    continue
+
+                nasa_raw = row.get("Weighted Nasa Score") or row.get("workload_rating")
+                nasa_val = None
+                if nasa_raw not in (None, "", "nan", "NaN"):
+                    try:
+                        nasa_val = float(nasa_raw)
+                    except ValueError:
+                        nasa_val = None
+
+                effort_val = row.get("Mental effort level") or row.get("difficulty")
+                meta_map[raw_name.lower()] = {
+                    "task_name": raw_name,
+                    "nasa_score": nasa_val,
+                    "effort": effort_val,
+                }
+
+        return meta_map
+
+    def load_labeled_pickle_segments(self, session_dir: Path) -> List[LabeledTaskSegment]:
+        """
+        Loads pre-segmented raw Muse S EEG pickles from <session_dir>/Labeled/<task>/muse_*_RAW.pickle
+        and pairs each task with its NASA-TLX / condition ground truth from Task_Labels.csv.
+        """
+        labeled_dir = session_dir / "Labeled"
+        if not labeled_dir.exists() or not labeled_dir.is_dir():
+            return []
+
+        label_file = self.find_task_labels_file(session_dir)
+        meta_map = self._parse_universe_task_metadata(label_file)
+
+        segments: List[LabeledTaskSegment] = []
+        for task_dir in sorted(labeled_dir.iterdir()):
+            if not task_dir.is_dir():
+                continue
+
+            task_name = task_dir.name
+            # Skip questionnaire self-report intervals (non-cognitive task artifacts)
+            if task_name.lower().startswith("questionnaire"):
+                continue
+
+            ch_arrays = []
+            min_len = None
+            missing_ch = False
+
+            for ch in self.STANDARD_CHANNELS:
+                pkl_path = task_dir / f"muse_{ch}_RAW.pickle"
+                if not pkl_path.exists():
+                    missing_ch = True
+                    break
+                try:
+                    series = pd.read_pickle(pkl_path)
+                    arr = np.asarray(series, dtype=np.float64).reshape(-1)
+                    # Replace any NaNs with channel median
+                    if np.isnan(arr).any():
+                        med = np.nanmedian(arr) if not np.isnan(arr).all() else 0.0
+                        arr = np.nan_to_num(arr, nan=med)
+                    ch_arrays.append(arr)
+                    min_len = len(arr) if min_len is None else min(min_len, len(arr))
+                except Exception:
+                    missing_ch = True
+                    break
+
+            if missing_ch or min_len is None or min_len < 256:
+                continue
+
+            # Align all 4 channels to identical sample count
+            eeg_matrix = np.vstack([a[:min_len] for a in ch_arrays])
+
+            # Match metadata from Task_Labels.csv (handle relaxation_video <-> video_baseline alias)
+            lookup_key = task_name.lower()
+            if lookup_key not in meta_map and lookup_key == "relaxation_video":
+                lookup_key = "video_baseline"
+
+            meta = meta_map.get(lookup_key, {})
+            cond, wl_level, wl_score = self._infer_label_from_task_and_nasa(
+                task_name=task_name,
+                nasa_score=meta.get("nasa_score"),
+                explicit_effort=meta.get("effort"),
+            )
+
+            segments.append(
+                LabeledTaskSegment(
+                    task_name=task_name,
+                    condition=cond,
+                    workload_level=wl_level,
+                    workload_score=wl_score,
+                    eeg_data=eeg_matrix,
+                    channels=list(self.STANDARD_CHANNELS),
+                )
+            )
+
+        return segments
+
     def find_eeg_file(self, session_dir: Path) -> Optional[Path]:
         """
         Locates the Muse S EEG CSV file within a session directory.
@@ -92,6 +273,7 @@ class UniverseDatasetLoader:
         candidates = [
             session_dir / "Raw" / "Muse" / "eeg.csv",
             session_dir / "Raw" / "Muse" / "raw_muse.csv",
+            session_dir / "Raw" / "Muse" / "Muse.csv",
             session_dir / "Raw" / "eeg.csv",
             session_dir / "eeg.csv",
         ]
@@ -99,14 +281,12 @@ class UniverseDatasetLoader:
             if c.exists():
                 return c
 
-        # Fallback: search for any .csv in Raw/Muse
         muse_dir = session_dir / "Raw" / "Muse"
         if muse_dir.exists():
             for f in muse_dir.glob("*.csv"):
                 if "acc" not in f.name.lower() and "gyro" not in f.name.lower():
                     return f
 
-        # Fallback: search for any csv with 'eeg' or 'muse' in name
         for f in session_dir.rglob("*.csv"):
             if "eeg" in f.name.lower() or "muse" in f.name.lower():
                 return f
@@ -134,28 +314,21 @@ class UniverseDatasetLoader:
 
     def read_eeg_csv(self, eeg_path: Path) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """
-        Parses EEG CSV data.
-        Returns:
-            timestamps: 1D array of time in seconds
-            eeg_data: 2D array [num_channels, num_samples]
-            channels: list of channel names in order
+        Parses continuous EEG CSV data (used for CSV sessions and synthetic mock tests).
         """
         with open(eeg_path, "r", encoding="utf-8", errors="ignore") as f:
             header_line = f.readline().strip()
 
-        # Parse delimiter (comma, semicolon, or tab)
         delimiter = "," if "," in header_line else (";" if ";" in header_line else "\t")
         columns = [c.strip().strip('"').strip("'") for c in header_line.split(delimiter)]
         col_lower = [c.lower() for c in columns]
 
-        # Resolve timestamp column
         time_idx = None
         for cand in ["timestamps", "timestamp", "time", "t", "index"]:
             if cand in col_lower:
                 time_idx = col_lower.index(cand)
                 break
 
-        # Resolve channel columns (TP9, AF7, AF8, TP10)
         channel_indices = {}
         for target_ch in self.STANDARD_CHANNELS:
             for idx, col in enumerate(col_lower):
@@ -163,10 +336,9 @@ class UniverseDatasetLoader:
                     channel_indices[target_ch] = idx
                     break
 
-        # Load numerical rows
         loaded_data = []
         with open(eeg_path, "r", encoding="utf-8", errors="ignore") as f:
-            next(f)  # skip header
+            next(f)
             for line in f:
                 parts = line.strip().split(delimiter)
                 if len(parts) >= len(columns):
@@ -183,16 +355,14 @@ class UniverseDatasetLoader:
 
         if time_idx is not None:
             raw_time = arr[:, time_idx]
-            # If timestamp is in milliseconds or nanoseconds, convert to seconds
-            if np.mean(raw_time) > 1e11:  # nanoseconds
+            if np.mean(raw_time) > 1e11:
                 raw_time = raw_time / 1e9
-            elif np.mean(raw_time) > 1e8:  # milliseconds
+            elif np.mean(raw_time) > 1e8:
                 raw_time = raw_time / 1e3
             timestamps = raw_time - raw_time[0]
         else:
             timestamps = np.arange(len(arr)) / 256.0
 
-        # Extract channels in standard order
         extracted_channels = []
         ch_signals = []
         for ch in self.STANDARD_CHANNELS:
@@ -200,7 +370,6 @@ class UniverseDatasetLoader:
                 ch_signals.append(arr[:, channel_indices[ch]])
                 extracted_channels.append(ch)
             else:
-                # If channel missing, create placeholder
                 ch_signals.append(np.zeros(len(arr)))
                 extracted_channels.append(ch)
 
@@ -209,7 +378,7 @@ class UniverseDatasetLoader:
 
     def read_task_labels(self, label_path: Optional[Path]) -> List[TaskInterval]:
         """
-        Parses task ground truth file containing task intervals, difficulties, and ratings.
+        Parses timestamped task ground truth CSV files (used for CSV sessions and mock tests).
         """
         if label_path is None or not label_path.exists():
             return []
@@ -220,9 +389,11 @@ class UniverseDatasetLoader:
             delimiter = "," if "," in header_line else (";" if ";" in header_line else "\t")
             cols = [c.strip().lower() for c in header_line.split(delimiter)]
 
-            # Map columns
+            if "start_time" not in cols and "start" not in cols:
+                return []
+
             name_idx = cols.index("task_name") if "task_name" in cols else (cols.index("task") if "task" in cols else 0)
-            start_idx = cols.index("start_time") if "start_time" in cols else (cols.index("start") if "start" in cols else 1)
+            start_idx = cols.index("start_time") if "start_time" in cols else cols.index("start")
             end_idx = cols.index("end_time") if "end_time" in cols else (cols.index("end") if "end" in cols else 2)
             diff_idx = cols.index("difficulty") if "difficulty" in cols else (cols.index("condition") if "condition" in cols else None)
             rating_idx = cols.index("workload_rating") if "workload_rating" in cols else (cols.index("rating") if "rating" in cols else None)
@@ -237,7 +408,6 @@ class UniverseDatasetLoader:
                         diff = parts[diff_idx] if diff_idx is not None and diff_idx < len(parts) else "medium"
                         rating = float(parts[rating_idx]) if rating_idx is not None and rating_idx < len(parts) else 3.0
 
-                        # Map to level
                         if rating <= 2.0 or diff.lower() in ["easy", "low"]:
                             wl_level = "low"
                         elif rating >= 4.0 or diff.lower() in ["hard", "high"]:
@@ -289,7 +459,6 @@ class UniverseDatasetLoader:
         """
         subjects = list(participants or self.discover_participants())
         if not subjects:
-            # Generate default 24 participant IDs for UNIVERSE
             subjects = [f"UN_{i:03d}" for i in range(101, 125)]
 
         rng = np.random.default_rng(random_seed)
@@ -320,8 +489,6 @@ class UniverseDatasetLoader:
     ) -> Tuple[Path, Path]:
         """
         Generates realistic synthetic Muse S EEG data and task labels for testing the pipeline.
-        Includes simulated brain rhythms (alpha desynchronization and theta elevation during high workload)
-        and realistic noise artifacts.
         """
         target_dir = Path(output_dir or self.raw_data_dir) / participant_id / session
         muse_dir = target_dir / "Raw" / "Muse"
@@ -330,47 +497,37 @@ class UniverseDatasetLoader:
         n_samples = int(duration_seconds * sampling_rate)
         t = np.arange(n_samples) / sampling_rate
 
-        # Simulate 3 task phases:
-        # Phase 1 (0-40s): Resting / Low Workload (strong 10 Hz alpha, low theta)
-        # Phase 2 (40-80s): Mental Arithmetic / High Workload (increased 6 Hz theta, reduced alpha)
-        # Phase 3 (80-120s): Stroop / Medium Workload (moderate theta and alpha)
         tasks = [
             ("Resting", "easy", "low", 1.5, 0.0, 40.0),
             ("Mental_Arithmetic", "hard", "high", 4.5, 40.0, 80.0),
             ("Stroop", "medium", "medium", 3.0, 80.0, 120.0),
         ]
 
-        # Generate channel signals (TP9, AF7, AF8, TP10)
         eeg_channels = {}
         for ch in self.STANDARD_CHANNELS:
-            sig = np.random.normal(0, 5.0, n_samples)  # 5 uV background noise
-            # 50 Hz powerline hum
+            sig = np.random.normal(0, 5.0, n_samples)
             sig += 8.0 * np.sin(2 * np.pi * 50.0 * t)
 
             for task_name, diff, wl, score, t_s, t_e in tasks:
                 mask = (t >= t_s) & (t < t_e)
                 if wl == "low":
-                    # Strong alpha on all channels, especially temporals and frontals
                     sig[mask] += 25.0 * np.sin(2 * np.pi * 10.0 * t[mask])
                     sig[mask] += 4.0 * np.sin(2 * np.pi * 6.0 * t[mask])
                 elif wl == "high":
-                    # Elevated frontal theta on AF7, AF8; suppressed alpha
                     if "AF" in ch:
                         sig[mask] += 28.0 * np.sin(2 * np.pi * 6.0 * t[mask])
                     sig[mask] += 6.0 * np.sin(2 * np.pi * 10.0 * t[mask])
-                    sig[mask] += 12.0 * np.sin(2 * np.pi * 20.0 * t[mask])  # beta
+                    sig[mask] += 12.0 * np.sin(2 * np.pi * 20.0 * t[mask])
                 else:
                     sig[mask] += 14.0 * np.sin(2 * np.pi * 10.0 * t[mask])
                     sig[mask] += 14.0 * np.sin(2 * np.pi * 6.0 * t[mask])
 
             eeg_channels[ch] = sig
 
-        # Add brief transient blink artifact at t=15s on AF7, AF8
         blink_mask = (t >= 15.0) & (t <= 15.3)
         eeg_channels["AF7"][blink_mask] += 65.0
         eeg_channels["AF8"][blink_mask] += 60.0
 
-        # Write eeg.csv
         eeg_csv_path = muse_dir / "eeg.csv"
         with open(eeg_csv_path, "w", encoding="utf-8") as f:
             f.write("timestamps,TP9,AF7,AF8,TP10\n")
@@ -380,7 +537,6 @@ class UniverseDatasetLoader:
                     f"{eeg_channels['AF8'][i]:.2f},{eeg_channels['TP10'][i]:.2f}\n"
                 )
 
-        # Write Task_Labels.csv
         labels_csv_path = target_dir / "Task_Labels.csv"
         with open(labels_csv_path, "w", encoding="utf-8") as f:
             f.write("task_name,start_time,end_time,difficulty,workload_rating\n")
