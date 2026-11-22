@@ -1,351 +1,177 @@
-﻿# EEG Workload API
+# EEG Workload API
 
-Backend service for the EEG Mental Workload project.
+Production FastAPI backend for wearable Muse S (`TP9`, `AF7`, `AF8`, `TP10` @ 256 Hz) EEG signal processing, signal quality assessment (SQA), per-user baseline calibration, and mental workload classification (`low` / `medium` / `high`).
 
-This repository is intended to contain the EEG/ML pipeline, from data processing and model training to production inference through a FastAPI service.
+- **Live API:** `https://eeg-workload-api.onrender.com`
+- **Swagger UI:** `https://eeg-workload-api.onrender.com/docs`
+- **Health Check:** `https://eeg-workload-api.onrender.com/health`
 
-## Project Scope
+---
 
-The system is intended to:
+## Quickstart & Local Setup
 
-- Process recorded EEG data
-- Assess EEG signal quality
-- Preprocess EEG signals
-- Extract relevant features
-- Train and evaluate workload-estimation models
-- Perform workload inference using an approved production model
-- Provide workload predictions through a REST API
-- Support future user-specific calibration/personalization
+Requires **Python 3.11+**:
 
-The project uses publicly available EEG datasets. Dataset files, experiment outputs, and development model artifacts are kept locally and are not committed to Git.
+```bash
+# 1. Clone & navigate to repo
+git clone https://github.com/<your-username>/eeg-workload-api.git
+cd eeg-workload-api
 
-## Current Status
+# 2. Create and activate virtual environment
+python -m venv .venv
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# Linux / macOS:
+source .venv/bin/activate
 
-The repository currently contains the initial backend/API skeleton.
+# 3. Install dependencies & run locally
+pip install -r requirements.txt       # or requirements-prod.txt for minimal runtime
+uvicorn app.main:app --reload --port 8000
 
-Implemented:
+# 4. Run test suite
+python -m pytest -v
+```
 
-- FastAPI application
-- `GET /health` endpoint
-- `POST /predict` endpoint with placeholder inference
-- Pydantic request/response schemas
-- Initial project structure and documentation
+### Docker
 
-The `/predict` endpoint currently returns a placeholder prediction. Real EEG preprocessing, signal-quality assessment, feature extraction, model training, and model inference have not yet been implemented.
+```bash
+docker build -t eeg-workload-api .
+docker run -p 7860:7860 -e PORT=7860 eeg-workload-api
+```
+
+---
+
+## API Endpoints
+
+| Endpoint | Method | Format | Description |
+| :--- | :---: | :--- | :--- |
+| `/health` | `GET` | — | Service status and active production model metadata |
+| `/predict` | `POST` | `application/json` | Workload prediction from raw EEG `[4 x N]` or feature vectors |
+| `/predict/upload` | `POST` | `multipart/form-data` | Upload `.csv` or `.json` EEG file for end-to-end inference |
+| `/calibrate` | `POST` | `application/json` | Store resting EEG baseline ($\ge$ 8s recommended) for a `user_id` |
+| `/calibrate/upload` | `POST` | `multipart/form-data` | Upload resting `.csv` or `.json` to calibrate a `user_id` |
+| `/calibrate/{user_id}` | `GET` / `DELETE` | — | Inspect or clear a stored resting baseline |
+
+---
+
+## Usage Examples
+
+### 1. Predict from Raw EEG (JSON)
+
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "session-001",
+    "user_id": "user-101",
+    "sampling_rate": 256.0,
+    "channel_names": ["TP9", "AF7", "AF8", "TP10"],
+    "eeg_data": [
+      [820.5, 822.1, 819.3, 821.0],
+      [810.2, 812.0, 808.9, 811.4],
+      [815.1, 814.8, 816.2, 815.5],
+      [825.0, 824.2, 823.1, 824.8]
+    ]
+  }'
+```
+
+### 2. Predict from CSV Upload
+
+Accepts standard Muse S CSV files (channels named `TP9, AF7, AF8, TP10` or `RAW_TP9, RAW_AF7, ...`):
+
+```bash
+curl -X POST "http://localhost:8000/predict/upload" \
+  -F "file=@recording.csv" \
+  -F "session_id=session-002" \
+  -F "user_id=user-101"
+```
+
+### 3. Response Schema (Excerpt)
+
+```json
+{
+  "session_id": "session-001",
+  "calibrated": true,
+  "signal_quality": {
+    "is_usable": true,
+    "overall_quality_score": 0.94,
+    "bad_channels": []
+  },
+  "predictions": [
+    {
+      "window": 1,
+      "start_time_sec": 0.0,
+      "end_time_sec": 4.0,
+      "workload": "medium",
+      "confidence": 0.88,
+      "theta_alpha_ratio": 1.42,
+      "details": { "tar_delta_from_baseline": 0.15 }
+    }
+  ],
+  "session_summary": {
+    "duration_seconds": 8.0,
+    "total_windows": 3,
+    "dominant_workload": "medium",
+    "level_percentages": { "low": 0.0, "medium": 66.7, "high": 33.3 }
+  }
+}
+```
+
+---
+
+## Pipeline & Data Specs
+
+- **Hardware & Channels:** Muse S 4-channel EEG (`TP9`, `AF7`, `AF8`, `TP10`) @ 256 Hz.
+- **Windowing:** 4.0-second sliding windows (1,024 samples) with 50% overlap (2.0s step).
+- **Preprocessing:** 0.5–45 Hz bandpass FIR filter, 50 Hz notch filter, Common Average Reference (CAR), and z-score normalization.
+- **Signal Quality Assessment (SQA):** Checks SNR and amplitude clipping/flatline per window. Degraded windows are flagged `unusable` without producing misleading workload predictions.
+- **Feature Extraction:** 112 features per window (band powers, Hjorth parameters, frontal alpha asymmetry, engagement index).
+- **Personalized Calibration:** Baseline resting recordings establish subject-specific resting TAR and engagement index; subsequent inference computes normalized delta metrics.
+
+---
 
 ## Repository Structure
 
 ```text
 eeg-workload-api/
-â”‚
-â”œâ”€â”€ app/                         # Production API and inference code
-â”‚   â”œâ”€â”€ api/                     # HTTP API routes
-â”‚   â”œâ”€â”€ schemas/                 # API request/response schemas
-â”‚   â”œâ”€â”€ services/                # EEG processing and inference services
-â”‚   â””â”€â”€ main.py                  # FastAPI application entry point
-â”‚
-â”œâ”€â”€ training/                    # Model training and evaluation pipeline
-â”‚
-â”œâ”€â”€ data/
-â”‚   â”œâ”€â”€ raw/                     # Raw datasets - not committed
-â”‚   â””â”€â”€ processed/               # Processed datasets - not committed
-â”‚
-â”œâ”€â”€ experiments/                 # Local experiment outputs - not committed
-â”‚
-â”œâ”€â”€ models/
-â”‚   â””â”€â”€ production/              # Approved production model
-â”‚
-â”œâ”€â”€ notebooks/                   # Exploratory and research notebooks
-â”‚
-â”œâ”€â”€ scripts/                     # Utility scripts
-â”‚
-â”œâ”€â”€ requirements.txt             # Python dependencies
-â”œâ”€â”€ .gitignore                   # Files excluded from Git
-â””â”€â”€ README.md                    # Project documentation
+├── .github/workflows/
+│   └── ci-deploy.yml          # Runs pytest, checks model loading, builds & smoke-tests Docker
+├── app/
+│   ├── api/routes.py          # FastAPI endpoints (/health, /predict, /calibrate)
+│   ├── schemas/prediction.py  # Pydantic request/response schemas
+│   ├── services/              # SQA, feature extraction, calibration, inference, file parsing
+│   └── main.py                # FastAPI app & CORS middleware
+├── models/production/         # Serialized model (.joblib) & feature metadata
+├── scripts/                   # Preprocessing, evaluation, streaming test harness
+├── tests/                     # Unit & integration test suite
+├── training/                  # Core feature extraction, signal quality, and model definitions
+├── Dockerfile                 # Slim Python 3.11 + XGBoost container
+├── requirements-prod.txt      # Minimal production runtime dependencies
+└── requirements.txt           # Local development & full training dependencies
 ```
 
-## Current Technology Stack
+---
 
-### Backend
+## Model Benchmarks (UNIVERSE Dataset)
 
-- Python 3.11
-- FastAPI
-- Uvicorn
-- Pydantic
+Evaluated strictly on 3 unseen test subjects (`UN_102`, `UN_109`, `UN_114`; 19,978 windows) after training on 17 subjects (112,515 windows):
 
-## Planned Technology Stack
+| Model | Input | Test Accuracy | Test Macro F1 | Live `p50` Latency |
+| :--- | :--- | :---: | :---: | :---: |
+| **XGBoost (balanced, prod)** | 112 spectral/Hjorth features | `0.341` | `0.284` | **8.5 ms** |
+| **Random Forest (balanced)** | 112 spectral/Hjorth features | `0.347` | `0.285` | — |
+| **EEGNet (PyTorch CUDA)** | Raw `[4 x 1024]` waveforms | `0.278` | `0.251` | — |
 
-The following technologies are candidates for the EEG/ML pipeline and will be added as the corresponding parts of the project are implemented and evaluated.
-
-### EEG / Scientific Computing
-
-- MNE-Python
-- NumPy
-- SciPy
-- pandas
-
-### Machine Learning
-
-- scikit-learn
-- XGBoost
-- Random Forest
-
-### Deep Learning
-
-- PyTorch
-- EEGNet
-
-### Development / Deployment
-
-- Git
-- GitHub
-- Docker
-- GitHub Actions
-
-Specific ML/DL algorithms and deployment infrastructure are not considered finalized until they have been evaluated or implemented.
-
-## Local Setup
-
-### Requirements
-
-- Python 3.11
-- Git
-
-### 1. Clone the repository
-
-```powershell
-git clone <repository-url>
-cd eeg-workload-api
+To preprocess data or retrain models:
+```bash
+python scripts/preprocess_universe.py
+python scripts/train_and_evaluate.py
 ```
 
-### 2. Create the virtual environment
+---
 
-```powershell
-py -3.11 -m venv .venv
-```
+## Deployment Notes (Render Free Tier)
 
-### 3. Activate the environment
-
-Windows PowerShell:
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-### 4. Install dependencies
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### 5. Run the API
-
-```powershell
-uvicorn app.main:app --reload
-```
-
-The API will be available at:
-
-`http://127.0.0.1:8000`
-
-Interactive API documentation:
-
-`http://127.0.0.1:8000/docs`
-
-## API
-
-### Health Check
-
-```http
-GET /health
-```
-
-Example response:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-### Workload Prediction
-
-```http
-POST /predict
-```
-
-Current request:
-
-```json
-{
-  "session_id": "demo-001"
-}
-```
-
-Current response:
-
-```json
-{
-  "session_id": "demo-001",
-  "status": "success",
-  "predictions": [
-    {
-      "window": 1,
-      "workload": "medium"
-    }
-  ]
-}
-```
-
-The prediction is currently a placeholder and does not perform real EEG inference.
-
-## Planned EEG Pipeline
-
-```text
-EEG Recording
-      â†“
-Data Validation
-      â†“
-Signal Quality Assessment
-      â†“
-EEG Preprocessing
-      â†“
-Windowing
-      â†“
-Feature Extraction
-      â†“
-Workload Model
-      â†“
-Workload Prediction
-      â†“
-API Response
-      â†“
-Next.js Application
-```
-
-## Training Pipeline
-
-The `training/` directory is intended to contain code used to train and evaluate workload-estimation models.
-
-The planned workflow is:
-
-```text
-Public Dataset
-      â†“
-Data Loading
-      â†“
-Preprocessing
-      â†“
-Feature Extraction
-      â†“
-Model Training
-      â†“
-Subject-Independent Evaluation
-      â†“
-Model Selection
-      â†“
-Production Model
-```
-
-The project intends to prioritize subject-independent evaluation to investigate how well models generalize to participants whose EEG was not used during training.
-
-## Dataset Policy
-
-Datasets are not stored in Git.
-
-Place downloaded datasets under:
-
-```text
-data/raw/
-```
-
-Processed data should be placed under:
-
-```text
-data/processed/
-```
-
-Both locations are ignored by Git.
-
-The repository should contain only the folder structure and documentation required to reproduce the setup.
-
-## Model Policy
-
-Experimental models are not committed to Git.
-
-During development, trained model artifacts remain local.
-
-The approved production model will be placed under:
-
-```text
-models/production/
-```
-
-and explicitly committed to Git only when it is selected for deployment.
-
-The production model must remain compatible with the preprocessing and feature-extraction pipeline used during training.
-
-Model metadata will be maintained alongside the production model to record information such as:
-
-- Model version
-- Dataset
-- Feature version
-- Preprocessing version
-- Workload classes
-
-## Production Code Ownership
-
-The following components are considered production-critical:
-
-- EEG preprocessing
-- Signal-quality assessment
-- Feature extraction
-- Model loading
-- Model inference
-- API schemas
-- API contract
-
-Changes to production-critical components should be reviewed before being merged.
-
-Training and experimental code may evolve more freely, provided it does not unintentionally modify the production pipeline.
-
-## API Contract
-
-The Next.js application communicates with this service through HTTP/JSON.
-
-Changes to API request or response schemas must be coordinated with the frontend repository.
-
-The API should remain independent of the Next.js application and should not contain frontend-specific logic.
-
-## Development Principles
-
-1. Build and validate the simplest working pipeline first.
-2. Do not assume a particular ML/DL model will perform best.
-3. Prevent data leakage during model evaluation.
-4. Separate experimental code from production inference code.
-5. Keep datasets and experimental artifacts out of Git.
-6. Keep production preprocessing compatible with the production model.
-7. Prefer reproducible experiments over undocumented manual changes.
-8. Do not claim model performance before it has been experimentally evaluated.
-
-## Deployment
-
-The application is intended to be containerized using Docker.
-
-The final hosting method will depend on available free infrastructure. Local or self-hosted execution will remain a fallback.
-
-Deployment automation will be implemented after the production inference pipeline is established.
-
-## Research Context
-
-The project investigates EEG-based mental workload estimation, with particular focus on:
-
-- Signal quality
-- Subject-independent workload estimation
-- Generalization to unseen participants
-- User-specific calibration/personalization
-- Comparison of classical machine learning and compact deep learning approaches
-
-The project does not claim to measure an absolute percentage of brain capacity or provide medical diagnosis.
-
-
+- Automatically built and deployed from `main` using `Dockerfile` (`requirements-prod.txt`).
+- Free instances sleep after 15 minutes of inactivity (~45–60s cold start on first request).
+- `/calibrate` baselines are stored in memory and reset on container restart or redeploy.
