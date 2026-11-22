@@ -14,7 +14,7 @@ Requires **Python 3.11+**:
 
 ```bash
 # 1. Clone & navigate to repo
-git clone https://github.com/<your-username>/eeg-workload-api.git
+git clone https://github.com/Divyanshu1405/eeg-workload-api.git
 cd eeg-workload-api
 
 # 2. Create and activate virtual environment
