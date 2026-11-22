@@ -22,23 +22,10 @@ from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 import joblib
 
+from training.models.xgb_wrapper import XGBWrapper
+
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
 logger = logging.getLogger("TrainAndEvaluate")
-
-
-class XGBWrapper:
-    """Top-level picklable wrapper around XGBClassifier + LabelEncoder."""
-    def __init__(self, clf: XGBClassifier, label_encoder: LabelEncoder):
-        self.clf = clf
-        self.le = label_encoder
-        self.classes_ = label_encoder.classes_
-
-    def predict(self, X):
-        preds_enc = self.clf.predict(X)
-        return self.le.inverse_transform(preds_enc)
-
-    def predict_proba(self, X):
-        return self.clf.predict_proba(X)
 
 
 def load_dataset_splits(processed_dir: Path):

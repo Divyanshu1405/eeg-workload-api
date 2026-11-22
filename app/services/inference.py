@@ -1,22 +1,21 @@
-"""
+﻿"""
 Inference service for EEG mental workload estimation.
-
-This service manages loading approved production models from `models/production/`
-and running predictions. If no model artifact is currently available in the
-production directory, it returns clearly labeled placeholder responses.
+Loads approved production .joblib/.pkl models and their feature metadata from models/production/.
 """
 
-import os
+import json
+import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.schemas.prediction import PredictionRequest, PredictionResponse, WorkloadPrediction
+
+logger = logging.getLogger("InferenceService")
 
 
 class InferenceService:
     def __init__(self, models_dir: Optional[Path] = None):
         if models_dir is None:
-            # Default to repo_root/models/production
             repo_root = Path(__file__).resolve().parent.parent.parent
             self.models_dir = repo_root / "models" / "production"
         else:
@@ -24,39 +23,49 @@ class InferenceService:
 
         self.model: Optional[Any] = None
         self.model_filename: Optional[str] = None
+        self.feature_names: Optional[List[str]] = None
+        self.metadata: Dict[str, Any] = {}
         self._load_model_if_available()
 
     def _load_model_if_available(self) -> None:
-        """Scan models/production for an approved model artifact and load it if found."""
+        """Scan models/production for a serialized model artifact (.joblib/.pkl) and metadata."""
         if not self.models_dir.exists():
             return
 
-        candidate_files = [
-            f for f in self.models_dir.iterdir()
-            if f.is_file() and not f.name.startswith(".") and f.name != ".gitkeep"
-        ]
+        meta_path = self.models_dir / "model_metadata.json"
+        preferred_type: Optional[str] = None
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    self.metadata = json.load(f)
+                self.feature_names = self.metadata.get("features_used")
+                preferred_type = self.metadata.get("model_type")
+            except Exception as e:
+                logger.warning("Failed to read model_metadata.json: %s", e)
 
+        candidate_files = sorted(
+            f for f in self.models_dir.iterdir()
+            if f.is_file() and f.suffix in {".joblib", ".pkl"}
+        )
         if not candidate_files:
             return
 
-        # Pick first available model file
         target_file = candidate_files[0]
-        self.model_filename = target_file.name
+        if preferred_type:
+            for f in candidate_files:
+                if preferred_type in f.name:
+                    target_file = f
+                    break
 
         try:
-            if target_file.suffix in [".pkl", ".joblib"]:
-                try:
-                    import joblib
-                    self.model = joblib.load(target_file)
-                except ImportError:
-                    import pickle
-                    with open(target_file, "rb") as f:
-                        self.model = pickle.load(f)
-            else:
-                # Unsupported format or generic file
-                self.model = None
-        except Exception:
+            import joblib
+            self.model = joblib.load(target_file)
+            self.model_filename = target_file.name
+            logger.info("Loaded production model: %s", self.model_filename)
+        except Exception as e:
+            logger.error("Failed to load model %s: %s", target_file.name, e)
             self.model = None
+            self.model_filename = None
 
     def get_model_info(self) -> Dict[str, Any]:
         """Return metadata about current model connectivity."""
@@ -65,22 +74,27 @@ class InferenceService:
             "model_connected": is_connected,
             "models_directory": str(self.models_dir),
             "model_file": self.model_filename,
+            "feature_dim": len(self.feature_names) if self.feature_names else None,
             "status": "ready" if is_connected else "no_model_found",
         }
 
     def predict(self, request: PredictionRequest) -> PredictionResponse:
-        """
-        Run inference using the loaded model if available;
-        otherwise return a clearly labelled placeholder response.
-        """
+        """Run inference on a pre-extracted feature vector."""
         feature_dim = len(request.features) if request.features is not None else None
 
-        # Scenario 1: Trained model is available and loaded
         if self.model is not None:
             try:
                 features_input = [request.features] if request.features is not None else []
                 raw_pred = self.model.predict(features_input)
                 prediction_val = str(raw_pred[0]) if len(raw_pred) > 0 else "unknown"
+
+                confidence = None
+                if hasattr(self.model, "predict_proba"):
+                    try:
+                        probs = self.model.predict_proba(features_input)
+                        confidence = round(float(max(probs[0])), 3)
+                    except Exception:
+                        confidence = None
 
                 return PredictionResponse(
                     session_id=request.session_id,
@@ -93,13 +107,12 @@ class InferenceService:
                         WorkloadPrediction(
                             window=1,
                             workload=prediction_val,
-                            confidence=None,
+                            confidence=confidence,
                             is_placeholder=False,
                         )
                     ],
                 )
             except Exception as e:
-                # Fallback if inference fails on invalid shape/data
                 return PredictionResponse(
                     session_id=request.session_id,
                     status="error",
@@ -110,7 +123,6 @@ class InferenceService:
                     predictions=[],
                 )
 
-        # Scenario 2: No trained model available -> Return clearly labelled placeholder
         return PredictionResponse(
             session_id=request.session_id,
             status="success",
@@ -132,5 +144,4 @@ class InferenceService:
         )
 
 
-# Global service instance
 inference_service = InferenceService()

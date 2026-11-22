@@ -1,12 +1,14 @@
-import json
+﻿import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import numpy as np
 
 from app.main import app
 from app.schemas.prediction import PredictionRequest
-from app.services.inference import InferenceService
+from app.services.inference import InferenceService, inference_service
 
 
 class TestAPIEndpoints(unittest.IsolatedAsyncioTestCase):
@@ -52,14 +54,16 @@ class TestAPIEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["status"], "ok")
         self.assertIn("service", data)
         self.assertIn("model_connected", data)
-        self.assertFalse(data["model_connected"])
+        self.assertIsInstance(data["model_connected"], bool)
+        self.assertIn(data["model_info"]["status"], ("ready", "no_model_found"))
 
     async def test_predict_with_feature_vector_placeholder(self):
         payload = json.dumps({
             "session_id": "session-test-001",
-            "features": [0.12, 0.45, 0.89, -0.34, 1.2]
+            "features": [0.12, 0.45, 0.89, -0.34, 1.2],
         }).encode("utf-8")
-        status, data = await self._call_endpoint("/predict", "POST", payload)
+        with patch.object(inference_service, "model", None):
+            status, data = await self._call_endpoint("/predict", "POST", payload)
         self.assertEqual(status, 200)
         self.assertEqual(data["session_id"], "session-test-001")
         self.assertEqual(data["status"], "success")
@@ -72,15 +76,32 @@ class TestAPIEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["predictions"][0]["is_placeholder"])
         self.assertEqual(data["predictions"][0]["workload"], "placeholder_medium")
 
+    async def test_predict_with_raw_eeg(self):
+        rng = np.random.default_rng(42)
+        t = np.linspace(0, 4.0, 1024, endpoint=False)
+        eeg = [
+            (820.0 + 15.0 * np.sin(2 * np.pi * 6.0 * t) + 5.0 * np.sin(2 * np.pi * 10.0 * t) + rng.normal(0, 2, 1024)).tolist()
+            for _ in range(4)
+        ]
+        payload = json.dumps({
+            "session_id": "session-raw-001",
+            "sampling_rate": 256.0,
+            "channel_names": ["TP9", "AF7", "AF8", "TP10"],
+            "eeg_data": eeg,
+        }).encode("utf-8")
+        status, data = await self._call_endpoint("/predict", "POST", payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "success")
+        self.assertEqual(len(data["predictions"]), 1)
+        self.assertTrue(data["signal_quality"]["is_usable"])
+
     def test_inference_service_with_trained_model(self):
         """Test the trained model branch when a model is present."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             model_file = Path(tmp_dir) / "test_model.pkl"
-            # Create a mock model file
             model_file.write_text("mock")
 
             service = InferenceService(models_dir=Path(tmp_dir))
-            # Inject a mock model object with a predict method
             mock_model = MagicMock()
             mock_model.predict.return_value = ["high"]
             service.model = mock_model
@@ -88,7 +109,7 @@ class TestAPIEndpoints(unittest.IsolatedAsyncioTestCase):
 
             req = PredictionRequest(
                 session_id="session-trained-001",
-                features=[0.5, 0.8, 1.2]
+                features=[0.5, 0.8, 1.2],
             )
             resp = service.predict(req)
 

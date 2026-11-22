@@ -4,11 +4,10 @@ Handles signal quality assessment, preprocessing, feature extraction, and worklo
 integrating with the trained production model via InferenceService.
 """
 
-from typing import List, Optional
+from typing import List
 import numpy as np
 
 from app.schemas.prediction import (
-    ChannelMetricsSchema,
     PredictionRequest,
     PredictionResponse,
     SignalQualitySchema,
@@ -26,9 +25,7 @@ from training.preprocessing.feature_extraction import (
 
 
 class EEGService:
-    """
-    High-performance production service for processing wearable Muse S EEG data.
-    """
+    """High-performance production service for processing wearable Muse S EEG data."""
 
     def __init__(self):
         self.preprocessor = UniverseEEGPreprocessor(
@@ -54,15 +51,18 @@ class EEGService:
         Estimates workload using the loaded production model if available,
         otherwise falls back to validated cognitive marker heuristics.
         """
-        # Format features as a 2D array matching training feature order
-        feature_keys = sorted([k for k in features.keys()])
-        feature_vector = [features[k] for k in feature_keys]
+        feature_keys = inference_service.feature_names or sorted(features.keys())
+        feature_vector = [float(features.get(k, 0.0)) for k in feature_keys]
 
         if inference_service.model is not None:
             try:
                 raw_pred = inference_service.model.predict([feature_vector])
                 predicted_level = str(raw_pred[0])
-                return predicted_level, 0.85
+                conf = 0.85
+                if hasattr(inference_service.model, "predict_proba"):
+                    probs = inference_service.model.predict_proba([feature_vector])
+                    conf = float(max(probs[0]))
+                return predicted_level, conf
             except Exception:
                 pass
 
@@ -79,14 +79,10 @@ class EEGService:
             return "medium", 0.75
 
     def process_request(self, request: PredictionRequest) -> PredictionResponse:
-        """
-        Processes an incoming API request (raw EEG or pre-extracted features).
-        """
-        # Scenario A: Pre-extracted feature vector provided directly
+        """Processes an incoming API request (raw EEG or pre-extracted features)."""
         if request.features is not None and (request.eeg_data is None or len(request.eeg_data) == 0):
             return inference_service.predict(request)
 
-        # Scenario B: No EEG data and no features provided -> default placeholder
         if request.eeg_data is None or len(request.eeg_data) == 0:
             return PredictionResponse(
                 session_id=request.session_id,
@@ -128,9 +124,7 @@ class EEGService:
                 predictions=[],
             )
 
-        window_duration = 4.0
-        window_samples = int(request.sampling_rate * window_duration)
-
+        window_samples = int(request.sampling_rate * 4.0)
         if eeg_arr.shape[1] > window_samples:
             windows = self.preprocessor.segment_and_preprocess_continuous(
                 eeg_arr, channel_names=channels
@@ -138,22 +132,18 @@ class EEGService:
         else:
             windows = [
                 self.preprocessor.preprocess_window(
-                    eeg_arr, channel_names=channels, window_index=1
+                    eeg_arr, channel_names=channels, window_index=0
                 )
             ]
 
         predictions: List[WorkloadPrediction] = []
         overall_usable = True
         avg_quality = 0.0
-        elevated_periods = []
-        level_counts = {"low": 0, "medium": 0, "high": 0, "unusable": 0}
-
         model_connected = inference_service.model is not None
 
         for win in windows:
             if not win.is_usable:
                 overall_usable = False
-                level_counts["unusable"] += 1
                 predictions.append(
                     WorkloadPrediction(
                         window=win.window_index + 1,
@@ -169,15 +159,10 @@ class EEGService:
                 win.data, win.channel_names
             )
             wl_level, conf = self.estimate_workload(feats)
-            level_counts[wl_level] = level_counts.get(wl_level, 0) + 1
-
-            if wl_level == "high":
-                elevated_periods.append([round(win.start_time_sec, 2), round(win.end_time_sec, 2)])
 
             tar = feats.get("frontal_theta_alpha_ratio")
             eng = feats.get("frontal_engagement_index")
             faa = feats.get("frontal_alpha_asymmetry")
-
             avg_quality += win.quality_metrics.overall_quality_score
 
             predictions.append(
@@ -201,31 +186,19 @@ class EEGService:
             rejection_reasons=first_metrics.rejection_reasons,
         )
 
-        total_wins = max(1, len(windows))
-        summary_percentages = {k: round((v / total_wins) * 100, 1) for k, v in level_counts.items()}
-
-        session_meta = {
-            "duration_seconds": round(eeg_arr.shape[1] / request.sampling_rate, 2),
-            "total_windows": len(windows),
-            "sampling_rate": request.sampling_rate,
-            "channels": channels,
-        }
-
-        session_summary = {
-            "level_percentages": summary_percentages,
-            "dominant_workload": max(level_counts, key=level_counts.get),
-        }
-
         return PredictionResponse(
             session_id=request.session_id,
             status="success",
             model_source="trained_model" if model_connected else "eeg_pipeline_heuristic",
             is_placeholder=not model_connected,
-            message=f"Successfully processed {len(windows)} windows using {'trained model' + inference_service.model_filename if model_connected else 'pipeline heuristics'}.",
+            message=(
+                f"Successfully processed {len(windows)} windows using trained model: {inference_service.model_filename}"
+                if model_connected
+                else f"Successfully processed {len(windows)} windows using pipeline heuristics."
+            ),
             predictions=predictions,
             signal_quality=sq_schema,
         )
 
 
-# Singleton instance
 eeg_service = EEGService()
