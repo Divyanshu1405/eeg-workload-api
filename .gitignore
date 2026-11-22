@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,9 +23,11 @@ data/processed/*
 experiments/*
 !experiments/.gitkeep
 
-# Trained models - normally ignored
+# Trained models - ignore experimental artifacts, track approved production model
 models/production/*
 !models/production/.gitkeep
+!models/production/model_metadata.json
+!models/production/universe_xgboost_prod.joblib
 
 # Jupyter
 .ipynb_checkpoints/

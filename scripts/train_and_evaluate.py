@@ -19,6 +19,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
 import joblib
 
@@ -67,18 +68,29 @@ def evaluate_model(model, X_test, y_test, participants_test):
     y_pred = model.predict(X_test)
     acc = float(accuracy_score(y_test, y_pred))
     f1_macro = float(f1_score(y_test, y_pred, average="macro", zero_division=0))
-    conf_mat = confusion_matrix(y_test, y_pred).tolist()
+    labels = sorted(list(np.unique(y_test)))
+    conf_mat = confusion_matrix(y_test, y_pred, labels=labels).tolist()
+
+    unique_preds, pred_counts = np.unique(y_pred, return_counts=True)
+    pred_distribution = {str(k): int(v) for k, v in zip(unique_preds, pred_counts)}
 
     per_participant = {}
     for p in np.unique(participants_test):
         mask = participants_test == p
         if np.sum(mask) > 0:
             p_acc = float(accuracy_score(y_test[mask], y_pred[mask]))
-            per_participant[str(p)] = {"accuracy": p_acc, "samples": int(np.sum(mask))}
+            p_f1 = float(f1_score(y_test[mask], y_pred[mask], average="macro", zero_division=0))
+            per_participant[str(p)] = {
+                "accuracy": p_acc,
+                "f1_macro": p_f1,
+                "samples": int(np.sum(mask)),
+            }
 
     return {
         "accuracy": acc,
         "f1_macro": f1_macro,
+        "labels": labels,
+        "pred_distribution": pred_distribution,
         "confusion_matrix": conf_mat,
         "per_participant": per_participant,
     }
@@ -113,18 +125,20 @@ def main():
         )
         model.fit(X_train, y_train)
     else:
-        logger.info("Training XGBoost Classifier (n_jobs=-1)...")
+        logger.info("Training Balanced XGBoost Classifier (n_jobs=-1)...")
         le = LabelEncoder()
         y_train_enc = le.fit_transform(y_train)
+        sample_weights = compute_sample_weight(class_weight="balanced", y=y_train_enc)
         xgb_model = XGBClassifier(
             n_estimators=150, max_depth=6, learning_rate=0.05, random_state=42, n_jobs=-1
         )
-        xgb_model.fit(X_train, y_train_enc)
+        xgb_model.fit(X_train, y_train_enc, sample_weight=sample_weights)
         model = XGBWrapper(xgb_model, le)
 
     logger.info("Evaluating model on subject-independent test partition...")
     metrics = evaluate_model(model, X_test, y_test, p_test)
     logger.info("Test Results -> Accuracy: %.3f | Macro F1: %.3f", metrics["accuracy"], metrics["f1_macro"])
+    logger.info("Test Predicted Class Distribution: %s", metrics["pred_distribution"])
 
     args.experiments_dir.mkdir(parents=True, exist_ok=True)
     exp_path = args.experiments_dir / f"evaluation_{args.model_type}.json"
@@ -139,6 +153,7 @@ def main():
 
     metadata = {
         "model_type": args.model_type,
+        "balanced_weights": True,
         "features_used": feature_cols,
         "feature_dim": len(feature_cols),
         "classes": list(np.unique(y_train)),

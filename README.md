@@ -1,4 +1,4 @@
-# EEG Workload API
+﻿# EEG Workload API
 
 Backend service for the EEG Mental Workload project.
 
@@ -37,31 +37,31 @@ The `/predict` endpoint currently returns a placeholder prediction. Real EEG pre
 
 ```text
 eeg-workload-api/
-│
-├── app/                         # Production API and inference code
-│   ├── api/                     # HTTP API routes
-│   ├── schemas/                 # API request/response schemas
-│   ├── services/                # EEG processing and inference services
-│   └── main.py                  # FastAPI application entry point
-│
-├── training/                    # Model training and evaluation pipeline
-│
-├── data/
-│   ├── raw/                     # Raw datasets - not committed
-│   └── processed/               # Processed datasets - not committed
-│
-├── experiments/                 # Local experiment outputs - not committed
-│
-├── models/
-│   └── production/              # Approved production model
-│
-├── notebooks/                   # Exploratory and research notebooks
-│
-├── scripts/                     # Utility scripts
-│
-├── requirements.txt             # Python dependencies
-├── .gitignore                   # Files excluded from Git
-└── README.md                    # Project documentation
+â”‚
+â”œâ”€â”€ app/                         # Production API and inference code
+â”‚   â”œâ”€â”€ api/                     # HTTP API routes
+â”‚   â”œâ”€â”€ schemas/                 # API request/response schemas
+â”‚   â”œâ”€â”€ services/                # EEG processing and inference services
+â”‚   â””â”€â”€ main.py                  # FastAPI application entry point
+â”‚
+â”œâ”€â”€ training/                    # Model training and evaluation pipeline
+â”‚
+â”œâ”€â”€ data/
+â”‚   â”œâ”€â”€ raw/                     # Raw datasets - not committed
+â”‚   â””â”€â”€ processed/               # Processed datasets - not committed
+â”‚
+â”œâ”€â”€ experiments/                 # Local experiment outputs - not committed
+â”‚
+â”œâ”€â”€ models/
+â”‚   â””â”€â”€ production/              # Approved production model
+â”‚
+â”œâ”€â”€ notebooks/                   # Exploratory and research notebooks
+â”‚
+â”œâ”€â”€ scripts/                     # Utility scripts
+â”‚
+â”œâ”€â”€ requirements.txt             # Python dependencies
+â”œâ”€â”€ .gitignore                   # Files excluded from Git
+â””â”€â”€ README.md                    # Project documentation
 ```
 
 ## Current Technology Stack
@@ -203,23 +203,23 @@ The prediction is currently a placeholder and does not perform real EEG inferenc
 
 ```text
 EEG Recording
-      ↓
+      â†“
 Data Validation
-      ↓
+      â†“
 Signal Quality Assessment
-      ↓
+      â†“
 EEG Preprocessing
-      ↓
+      â†“
 Windowing
-      ↓
+      â†“
 Feature Extraction
-      ↓
+      â†“
 Workload Model
-      ↓
+      â†“
 Workload Prediction
-      ↓
+      â†“
 API Response
-      ↓
+      â†“
 Next.js Application
 ```
 
@@ -231,19 +231,19 @@ The planned workflow is:
 
 ```text
 Public Dataset
-      ↓
+      â†“
 Data Loading
-      ↓
+      â†“
 Preprocessing
-      ↓
+      â†“
 Feature Extraction
-      ↓
+      â†“
 Model Training
-      ↓
+      â†“
 Subject-Independent Evaluation
-      ↓
+      â†“
 Model Selection
-      ↓
+      â†“
 Production Model
 ```
 
@@ -347,3 +347,5 @@ The project investigates EEG-based mental workload estimation, with particular f
 - Comparison of classical machine learning and compact deep learning approaches
 
 The project does not claim to measure an absolute percentage of brain capacity or provide medical diagnosis.
+
+

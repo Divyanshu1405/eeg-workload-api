@@ -1,0 +1,12 @@
+﻿.venv
+.git
+.github
+__pycache__
+*.pyc
+.pytest_cache
+data/
+experiments/
+notebooks/
+tests/
+models/production/*.pt
+models/production/universe_random_forest_prod.joblib

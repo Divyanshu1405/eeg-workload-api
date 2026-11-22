@@ -1,0 +1,64 @@
+﻿name: CI & Model Deployment
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-prod.txt
+
+      - name: Install production + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-prod.txt pytest httpx
+
+      - name: Run unit & API integration tests
+        run: python -m pytest -v
+
+      - name: Verify production model loads cleanly without PyTorch
+        run: |
+          python -c "
+          from fastapi.testclient import TestClient
+          from app.main import app
+          client = TestClient(app)
+          r = client.get('/health')
+          assert r.status_code == 200
+          data = r.json()
+          print('HEALTH:', data)
+          assert data['model_connected'] is True, 'Production model failed to load!'
+          "
+
+  docker-build-and-deploy:
+    needs: test-and-verify
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: docker build -t eeg-workload-api:latest .
+
+      - name: Smoke-test running Docker container
+        run: |
+          docker run -d --name api-test -e PORT=8000 -p 8000:8000 eeg-workload-api:latest
+          sleep 3
+          curl -f http://127.0.0.1:8000/health
+          docker stop api-test
+
+      - name: Trigger Render Deploy Hook (optional)
+        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
